@@ -90,11 +90,8 @@ def kb(text: str, style: str = "primary", icon_custom_emoji_id: str | None = Non
     return KeyboardButton(text)
 
 
-def ib(text, style=None, **kwargs):
-    return InlineKeyboardButton(
-        text,
-        **kwargs,
-    ) -> InlineKeyboardButton:
+def ib(text: str, style: str = "primary", **kwargs) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text, **kwargs) -> InlineKeyboardButton:
     return InlineKeyboardButton(
         text,
         style=style,
