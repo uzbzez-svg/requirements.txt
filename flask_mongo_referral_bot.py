@@ -87,7 +87,7 @@ def setup_indexes() -> None:
 
 
 def kb(text: str, style: str = "primary", icon_custom_emoji_id: str | None = None) -> KeyboardButton:
-    return KeyboardButton(text, style=style, icon_custom_emoji_id=icon_custom_emoji_id)
+    return KeyboardButton(text)
 
 
 def ib(
