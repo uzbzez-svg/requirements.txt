@@ -47,7 +47,7 @@ MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://yusufbekkabulov2014_db_user:lg
 MONGO_DB = os.getenv("MONGO_DB", "clckinobot").strip()
 
 # Hostingda WEBHOOK_URL public HTTPS bo'ladi. Localda bo'sh qoldiring, polling ishlaydi.
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://api.telegram.org/bot8831278254:AAEMAByBTcSA2nZVc4iwa4HZ94OKwHgmc9c/setWebhook?url=https://requirements-txt-th8.onrender.com/webhook").strip()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", secrets.token_urlsafe(24)).strip()
 PORT = int(os.getenv("PORT", "5000"))
 
