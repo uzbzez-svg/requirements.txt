@@ -940,7 +940,7 @@ def health():
     return jsonify({"ok": True, "bot": "flask-mongo-referral-coin-bot"})
 
 
-@flask_app.post(f"/webhook/{WEBHOOK_SECRET}")
+@flask_app.post(f"/webhook/")
 async def webhook():
     global telegram_started
     if not telegram_started:
