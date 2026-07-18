@@ -58,7 +58,7 @@ REFERRAL_REWARD = int(os.getenv("REFERRAL_REWARD", "1000"))
 UTC = timezone.utc
 ADMIN_IDS = {int(item.strip()) for item in ADMIN_IDS_TEXT.split(",") if item.strip().isdigit()}
 
-if not BOT_TOKEN or "SHU_YERGA" in BOT_TOKEN:
+if not BOT_TOKEN or "8831278254:AAEMAByBTcSA2nZVc4iwa4HZ94OKwHgmc9c" in BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN kiritilmagan. BOT_TOKEN env qiymatini yoki fayldagi joyni to'ldiring.")
 
 mongo = MongoClient(MONGO_URI)
