@@ -46,7 +46,7 @@ load_env_file()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8831278254:AAEMAByBTcSA2nZVc4iwa4HZ94OKwHgmc9c").strip()
 ADMIN_IDS_TEXT = os.getenv("ADMIN_IDS", "6968399046").strip()
-MONGO_URI = os.getenv("MONGO_URI", "mongodb+@clckinobot.quwlz1w.mongodb.net/?appName=clckinobot").strip()
+MONGO_URI = os.getenv("MONGO_URI", "nmongodb+srv://yusufbekkabulov2014_db_user:<jpgKQeQOx2N4Q9o>@clckinobot.quwlz1w.mongodb.net/?appName=clckinobot").strip()
 MONGO_DB = os.getenv("MONGO_DB", "clckinobot").strip()
 
 # Hostingda WEBHOOK_URL public HTTPS bo'ladi. Localda bo'sh qoldiring, polling ishlaydi.
