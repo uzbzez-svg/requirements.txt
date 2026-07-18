@@ -1,6 +1,9 @@
 import asyncio
 import os
+import re
 import secrets
+import threading
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -43,11 +46,11 @@ load_env_file()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8831278254:AAEMAByBTcSA2nZVc4iwa4HZ94OKwHgmc9c").strip()
 ADMIN_IDS_TEXT = os.getenv("ADMIN_IDS", "6968399046").strip()
-MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://yusufbekkabulov2014_db_user:lgqZyB9D7Xpdovgr@clckinobot.quwlz1w.mongodb.net/?appName=clckinobot").strip()
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+@clckinobot.quwlz1w.mongodb.net/?appName=clckinobot").strip()
 MONGO_DB = os.getenv("MONGO_DB", "clckinobot").strip()
 
 # Hostingda WEBHOOK_URL public HTTPS bo'ladi. Localda bo'sh qoldiring, polling ishlaydi.
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://api.telegram.org/bot8831278254:AAEMAByBTcSA2nZVc4iwa4HZ94OKwHgmc9c/setWebhook?url=https://requirements-txt-th8.onrender.com/webhook").strip()
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", secrets.token_urlsafe(24)).strip()
 PORT = int(os.getenv("PORT", "5000"))
 
@@ -65,11 +68,16 @@ referrals = db.referrals
 channels = db.channels
 withdrawals = db.withdrawals
 broadcasts = db.broadcasts
+admins = db.admins
 
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 bot = Bot(BOT_TOKEN)
 flask_app = Flask(__name__)
 telegram_started = False
+telegram_start_error: BaseException | None = None
+telegram_loop = asyncio.new_event_loop()
+telegram_ready = threading.Event()
+telegram_thread: threading.Thread | None = None
 
 
 def now() -> datetime:
@@ -84,23 +92,32 @@ def setup_indexes() -> None:
     referrals.create_index([("referrer_id", ASCENDING), ("created_at", DESCENDING)])
     channels.create_index([("chat_id", ASCENDING)], unique=True)
     withdrawals.create_index([("user_id", ASCENDING), ("created_at", DESCENDING)])
+    admins.create_index([("_id", ASCENDING)])
+    admins.create_index([("username", ASCENDING)])
 
 
 def kb(text: str, style: str = "primary", icon_custom_emoji_id: str | None = None) -> KeyboardButton:
     return KeyboardButton(text)
 
 
-def ib(text: str, style: str = "primary", **kwargs) -> InlineKeyboardButton:
+def ib(
+    text: str,
+    style: str = "primary",
+    icon_custom_emoji_id: str | None = None,
+    **kwargs: Any,
+) -> InlineKeyboardButton:
     return InlineKeyboardButton(text, **kwargs)
-    return InlineKeyboardButton(
-        text,
-        style=style,
-        icon_custom_emoji_id=icon_custom_emoji_id,
-        **kwargs,
-    )
 
 
-MAIN_MENU = ReplyKeyboardMarkup(
+USER_MENU = ReplyKeyboardMarkup(
+    [
+        [kb("🪙 Tekin coin olish", "success"), kb("💼 Mening hisobim", "primary")],
+        [kb("🛒 Coinni yechish", "danger")],
+    ],
+    resize_keyboard=True,
+)
+
+ADMIN_MAIN_MENU = ReplyKeyboardMarkup(
     [
         [kb("🪙 Tekin coin olish", "success"), kb("💼 Mening hisobim", "primary")],
         [kb("🛒 Coinni yechish", "danger")],
@@ -120,6 +137,10 @@ ADMIN_MENU = InlineKeyboardMarkup(
             ib("📢 Hammaga xabar", "primary", callback_data="admin:broadcast"),
         ],
         [ib("📋 Majburiy obunalar ro'yxati", "primary", callback_data="admin:list_channels")],
+        [
+            ib("👑 Yangi admin qo'shish", "success", callback_data="admin:add_admin"),
+            ib("🗑 Adminni olib tashlash", "danger", callback_data="admin:remove_admin"),
+        ],
     ]
 )
 
@@ -165,13 +186,32 @@ WITHDRAW_ITEMS = [
     ("game_money", "💸 O'yin puli", 6000),
     ("coin30000", "🪙 30.000 coin", 10000),
     ("chrome", "🔷 Xrom qilish", 10000),
+     ("id", "🆔 ID OZGARTIRISH", 7000),
 ]
 WITHDRAW_LABELS = {code: label for code, label, _price in WITHDRAW_ITEMS}
 WITHDRAW_PRICES = {code: price for code, _label, price in WITHDRAW_ITEMS}
 
 
 def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
+    return user_id in ADMIN_IDS or admins.find_one({"_id": user_id}) is not None
+
+
+def all_admin_ids() -> set[int]:
+    saved_admins = {admin["_id"] for admin in admins.find({}, {"_id": 1})}
+    return ADMIN_IDS | saved_admins
+
+
+def main_menu_for(user_id: int) -> ReplyKeyboardMarkup:
+    return ADMIN_MAIN_MENU if is_admin(user_id) else USER_MENU
+
+
+class AdminStateFilter(filters.MessageFilter):
+    def filter(self, message) -> bool:
+        tg_user = message.from_user
+        if not tg_user or not is_admin(tg_user.id):
+            return False
+        user = get_user(tg_user.id)
+        return bool(user and user.get("state"))
 
 
 def get_user(user_id: int) -> dict[str, Any] | None:
@@ -187,6 +227,13 @@ def user_name(user: dict[str, Any] | None) -> str:
         item for item in [user.get("first_name"), user.get("last_name")] if item
     ).strip()
     return full_name or str(user["_id"])
+
+
+def find_user_by_username(username: str) -> dict[str, Any] | None:
+    clean = username.strip().lstrip("@")
+    if not clean:
+        return None
+    return users.find_one({"username": {"$regex": f"^{re.escape(clean)}$", "$options": "i"}})
 
 
 def profile_url(user_id: int) -> str:
@@ -452,7 +499,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.reply_text(
         "Assalomu alaykum! Kerakli bo'limni tanlang.",
-        reply_markup=MAIN_MENU,
+        reply_markup=main_menu_for(update.effective_user.id),
     )
 
 
@@ -478,7 +525,7 @@ async def check_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     await maybe_count_referral(query.from_user.id, context)
-    await query.message.reply_text("✅ Obuna tasdiqlandi. Botdan foydalanishingiz mumkin.", reply_markup=MAIN_MENU)
+    await query.message.reply_text("✅ Obuna tasdiqlandi. Botdan foydalanishingiz mumkin.", reply_markup=main_menu_for(query.from_user.id))
 
 
 async def requirement_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -650,7 +697,7 @@ async def withdraw_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"Yechilgan coin: {price}\n"
         f"So'rov ID: {insert_result.inserted_id}"
     )
-    for admin_id in ADMIN_IDS:
+    for admin_id in all_admin_ids():
         try:
             await context.bot.send_message(admin_id, admin_text, reply_markup=admin_keyboard)
         except TelegramError:
@@ -732,6 +779,28 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.message.reply_text("Yuboriladigan xabarni tashlang. Matn, rasm, video va boshqa turdagi xabarlar ishlaydi.")
         return
 
+    if action == "add_admin":
+        users.update_one(
+            {"_id": query.from_user.id},
+            {"$set": {"state": "admin_add_admin_username"}, "$unset": {"pending_admin_add": ""}},
+        )
+        await query.message.reply_text("👤 Qo'shmoqchi bo'lgan admin username'ni tashlang. Masalan: @username")
+        return
+
+    if action == "remove_admin":
+        saved_admins = list(admins.find({}).sort("created_at", ASCENDING))
+        if not saved_admins:
+            await query.message.reply_text("Panel orqali qo'shilgan admin yo'q.")
+            return
+        rows = []
+        for admin in saved_admins:
+            label = f"🗑 {user_name(admin)}"
+            if admin.get("first_name"):
+                label = f"🗑 {admin.get('first_name')} {user_name(admin)}"
+            rows.append([ib(label, "danger", callback_data=f"admin_remove:{admin['_id']}")])
+        await query.message.reply_text("Olib tashlanadigan adminni tanlang:", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
     if action == "list_channels":
         all_channels = list(channels.find({}).sort("created_at", ASCENDING))
         if not all_channels:
@@ -783,6 +852,55 @@ async def requirement_type_callback(update: Update, context: ContextTypes.DEFAUL
     await query.message.reply_text(config["prompt_name"])
 
 
+async def admin_add_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.message.reply_text("Bu bo'lim faqat admin uchun.")
+        return
+
+    new_admin_id = int(query.data.split(":", 1)[1])
+    user = get_user(new_admin_id)
+    if not user:
+        await query.message.reply_text("Foydalanuvchi topilmadi. Avval botga /start bossin.")
+        return
+
+    admins.update_one(
+        {"_id": new_admin_id},
+        {
+            "$set": {
+                "username": user.get("username"),
+                "first_name": user.get("first_name"),
+                "last_name": user.get("last_name"),
+                "added_by": query.from_user.id,
+                "updated_at": now(),
+            },
+            "$setOnInsert": {"created_at": now()},
+        },
+        upsert=True,
+    )
+    users.update_one({"_id": query.from_user.id}, {"$set": {"state": None}, "$unset": {"pending_admin_add": ""}})
+    await query.message.reply_text(f"✅ {user_name(user)} admin qilib qo'shildi.", reply_markup=ADMIN_MENU)
+
+
+async def admin_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.message.reply_text("Bu bo'lim faqat admin uchun.")
+        return
+
+    admin_id = int(query.data.split(":", 1)[1])
+    if admin_id in ADMIN_IDS:
+        await query.message.reply_text("Asosiy adminni paneldan olib tashlab bo'lmaydi.")
+        return
+    removed = admins.find_one_and_delete({"_id": admin_id})
+    if not removed:
+        await query.message.reply_text("Admin topilmadi yoki allaqachon olib tashlangan.")
+        return
+    await query.message.reply_text(f"✅ {user_name(removed)} adminlikdan olib tashlandi.", reply_markup=ADMIN_MENU)
+
+
 async def admin_state_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tg_user = update.effective_user
     if not tg_user or not is_admin(tg_user.id):
@@ -790,6 +908,41 @@ async def admin_state_messages(update: Update, context: ContextTypes.DEFAULT_TYP
 
     admin = get_user(tg_user.id) or upsert_user(tg_user)
     state = admin.get("state")
+
+    if state == "admin_add_admin_username":
+        if not update.message.text:
+            await update.message.reply_text("Username matn ko'rinishida yuboring. Masalan: @username")
+            return
+        candidate = find_user_by_username(update.message.text)
+        if not candidate:
+            await update.message.reply_text(
+                "Bu username bot foydalanuvchilari ichidan topilmadi.\n"
+                "Admin qilinadigan odam avval botga /start bosishi kerak."
+            )
+            return
+        if candidate["_id"] == tg_user.id:
+            await update.message.reply_text("O'zingizni qayta admin qilib qo'shish shart emas.")
+            return
+        if is_admin(candidate["_id"]):
+            await update.message.reply_text("Bu foydalanuvchi allaqachon admin.")
+            return
+        users.update_one(
+            {"_id": tg_user.id},
+            {
+                "$set": {
+                    "pending_admin_add": candidate["_id"],
+                    "updated_at": now(),
+                }
+            },
+        )
+        keyboard = InlineKeyboardMarkup(
+            [[ib("✅ Tasdiqlash", "success", callback_data=f"admin_add_confirm:{candidate['_id']}")]]
+        )
+        await update.message.reply_text(
+            f"{user_name(candidate)} admin qilib qo'shishni tasdiqlaysizmi?",
+            reply_markup=keyboard,
+        )
+        return
 
     if state == "admin_add_requirement_name":
         if not update.message.text:
@@ -870,7 +1023,7 @@ async def admin_state_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         save_requirement(req_type, title, target, invite_link)
         users.update_one({"_id": tg_user.id}, {"$set": {"state": None}})
-        await update.message.reply_text("✅ Majburiy obuna qo'shildi.", reply_markup=MAIN_MENU)
+        await update.message.reply_text("✅ Majburiy obuna qo'shildi.", reply_markup=main_menu_for(tg_user.id))
         return
 
     if state == "admin_broadcast":
@@ -897,7 +1050,7 @@ async def admin_state_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                 "created_at": now(),
             }
         )
-        await update.message.reply_text(f"✅ Yuborildi: {sent}\n❌ Yetib bormadi: {failed}", reply_markup=MAIN_MENU)
+        await update.message.reply_text(f"✅ Yuborildi: {sent}\n❌ Yetib bormadi: {failed}", reply_markup=main_menu_for(tg_user.id))
 
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -905,7 +1058,7 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         upsert_user(update.effective_user)
     if not await require_subscription(update, context):
         return
-    await update.effective_message.reply_text("Menyudan kerakli tugmani tanlang.", reply_markup=MAIN_MENU)
+    await update.effective_message.reply_text("Menyudan kerakli tugmani tanlang.", reply_markup=main_menu_for(update.effective_user.id))
 
 
 def register_handlers() -> None:
@@ -918,6 +1071,8 @@ def register_handlers() -> None:
     telegram_app.add_handler(CallbackQueryHandler(withdraw_select, pattern="^withdraw:"))
     telegram_app.add_handler(CallbackQueryHandler(withdraw_confirm, pattern="^confirm:"))
     telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin:"))
+    telegram_app.add_handler(CallbackQueryHandler(admin_add_confirm_callback, pattern="^admin_add_confirm:"))
+    telegram_app.add_handler(CallbackQueryHandler(admin_remove_callback, pattern="^admin_remove:"))
     telegram_app.add_handler(CallbackQueryHandler(remove_channel_callback, pattern="^remove_channel:"))
     telegram_app.add_handler(CallbackQueryHandler(lambda update, context: update.callback_query.answer(), pattern="^noop$"))
     telegram_app.add_handler(
@@ -927,7 +1082,7 @@ def register_handlers() -> None:
             main_menu_handler,
         )
     )
-    telegram_app.add_handler(MessageHandler(filters.ALL & filters.User(list(ADMIN_IDS)), admin_state_messages))
+    telegram_app.add_handler(MessageHandler(AdminStateFilter(), admin_state_messages))
     telegram_app.add_handler(MessageHandler(filters.ALL, unknown))
 
 
@@ -935,20 +1090,55 @@ register_handlers()
 setup_indexes()
 
 
+def run_telegram_loop() -> None:
+    asyncio.set_event_loop(telegram_loop)
+
+    async def start_telegram_app() -> None:
+        global telegram_started, telegram_start_error
+        try:
+            await telegram_app.initialize()
+            await telegram_app.start()
+            telegram_started = True
+        except BaseException as exc:
+            telegram_start_error = exc
+        finally:
+            telegram_ready.set()
+
+    telegram_loop.create_task(start_telegram_app())
+    telegram_loop.run_forever()
+
+
+def ensure_telegram_started() -> None:
+    global telegram_thread
+    if telegram_started:
+        return
+
+    if telegram_thread is None or not telegram_thread.is_alive():
+        telegram_ready.clear()
+        telegram_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+        telegram_thread.start()
+
+    telegram_ready.wait(timeout=20)
+    if telegram_start_error:
+        raise RuntimeError("Telegram app ishga tushmadi.") from telegram_start_error
+    if not telegram_started:
+        raise RuntimeError("Telegram app ishga tushishi 20 sekund ichida tugamadi.")
+
+
 @flask_app.get("/")
 def health():
     return jsonify({"ok": True, "bot": "flask-mongo-referral-coin-bot"})
 
 
-@flask_app.post(f"/webhook/")
-async def webhook():
-    global telegram_started
-    if not telegram_started:
-        await telegram_app.initialize()
-        await telegram_app.start()
-        telegram_started = True
+@flask_app.post("/webhook")
+def webhook():
+    ensure_telegram_started()
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    await telegram_app.process_update(update)
+    future = asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), telegram_loop)
+    try:
+        future.result(timeout=30)
+    except FutureTimeoutError:
+        return jsonify({"ok": False, "error": "telegram_update_timeout"}), 504
     return jsonify({"ok": True})
 
 
@@ -959,7 +1149,10 @@ def set_webhook_command():
 
     async def set_webhook():
         await telegram_app.initialize()
-        await telegram_app.bot.set_webhook(f"{WEBHOOK_URL.rstrip('/')}/webhook/{WEBHOOK_SECRET}")
+        webhook_url = WEBHOOK_URL.rstrip("/")
+        if not webhook_url.endswith("/webhook"):
+            webhook_url = f"{webhook_url}/webhook"
+        await telegram_app.bot.set_webhook(webhook_url)
         await telegram_app.shutdown()
 
     asyncio.run(set_webhook())
