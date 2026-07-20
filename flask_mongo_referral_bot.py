@@ -1,7 +1,6 @@
 import asyncio
 import os
 import re
-import secrets
 import threading
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone
@@ -30,6 +29,9 @@ from telegram.ext import (
 )
 
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
 def load_env_file(path: str = ".env") -> None:
     if not os.path.exists(path):
         return
@@ -39,27 +41,46 @@ def load_env_file(path: str = ".env") -> None:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+            os.environ[key.strip()] = value.strip().strip('"').strip("'")
 
 
-load_env_file()
+load_env_file(os.path.join(BASE_DIR, ".env"))
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8831278254:AAEMAByBTcSA2nZVc4iwa4HZ94OKwHgmc9c").strip()
+
+def clean_env(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def first_valid_env(*names: str, default: str = "") -> str:
+    bad_parts = ("{", "}", "your_", "SHU_YERGA")
+    for name in names:
+        value = clean_env(name)
+        if value and not any(part in value for part in bad_parts):
+            return value
+    return default
+
+BOT_TOKEN = first_valid_env("BOT_TOKEN", default="8831278254:AAEMAByBTcSA2nZVc4iwa4HZ94OKwHgmc9c")
 ADMIN_IDS_TEXT = os.getenv("ADMIN_IDS", "6968399046").strip()
-MONGO_URI = os.getenv("MONGO_URI", "nmongodb+srv://yusufbekkabulov2014_db_user:<jpgKQeQOx2N4Q9o>@clckinobot.quwlz1w.mongodb.net/?appName=clckinobot").strip()
-MONGO_DB = os.getenv("MONGO_DB", "clckinobot").strip()
+MONGO_URI = first_valid_env(
+    "MONGODB_URI",
+    "MONGO_URI",
+    default="mongodb+srv://nabijonmadaminov5_db_user:waD0CxXozOC75Odn@cluster0.ccjzdn4.mongodb.net/?appName=Cluster0",
+)
+MONGO_DB = first_valid_env("MONGO_DB", "MONGODB_DB", default="clckinobot")
 
 # Hostingda WEBHOOK_URL public HTTPS bo'ladi. Localda bo'sh qoldiring, polling ishlaydi.
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", secrets.token_urlsafe(24)).strip()
+WEBHOOK_URL = first_valid_env("WEBHOOK_URL", "PUBLIC_BASE_URL")
+WEBHOOK_SECRET = clean_env("WEBHOOK_SECRET")
 PORT = int(os.getenv("PORT", "5000"))
 
 REFERRAL_REWARD = int(os.getenv("REFERRAL_REWARD", "1000"))
 UTC = timezone.utc
 ADMIN_IDS = {int(item.strip()) for item in ADMIN_IDS_TEXT.split(",") if item.strip().isdigit()}
 
-if not BOT_TOKEN or "8831278254:AAEMAByBTcSA2nZVc4iwa4HZ94OKwHgmc9c" in BOT_TOKEN:
+if not BOT_TOKEN or "SHU_YERGA" in BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN kiritilmagan. BOT_TOKEN env qiymatini yoki fayldagi joyni to'ldiring.")
+if not MONGO_URI:
+    raise RuntimeError("MONGO_URI yoki MONGODB_URI kiritilmagan. .env ichiga MongoDB connection string yozing.")
 
 mongo = MongoClient(MONGO_URI)
 db = mongo[MONGO_DB]
@@ -78,6 +99,7 @@ telegram_start_error: BaseException | None = None
 telegram_loop = asyncio.new_event_loop()
 telegram_ready = threading.Event()
 telegram_thread: threading.Thread | None = None
+webhook_configured = False
 
 
 def now() -> datetime:
@@ -96,8 +118,42 @@ def setup_indexes() -> None:
     admins.create_index([("username", ASCENDING)])
 
 
+def webhook_path() -> str:
+    return f"/webhook/{WEBHOOK_SECRET}" if WEBHOOK_SECRET else "/webhook"
+
+
+def webhook_url(public_base_url: str | None = None) -> str:
+    base_url = (public_base_url or WEBHOOK_URL).rstrip("/")
+    if base_url.endswith("/webhook") or "/webhook/" in base_url:
+        return base_url
+    return f"{base_url}{webhook_path()}"
+
+
+def request_public_base_url() -> str:
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip()
+    forwarded_host = request.headers.get("X-Forwarded-Host", "").split(",", 1)[0].strip()
+    if forwarded_host:
+        proto = forwarded_proto or "https"
+        return f"{proto}://{forwarded_host}"
+    return request.url_root.rstrip("/")
+
+
+async def configure_webhook(public_base_url: str | None = None) -> None:
+    if not (public_base_url or WEBHOOK_URL):
+        return
+    await bot.set_webhook(webhook_url(public_base_url))
+
+
+def configure_webhook_once(public_base_url: str | None = None) -> None:
+    global webhook_configured
+    if webhook_configured or not (public_base_url or WEBHOOK_URL):
+        return
+    asyncio.run(configure_webhook(public_base_url))
+    webhook_configured = True
+
+
 def kb(text: str, style: str = "primary", icon_custom_emoji_id: str | None = None) -> KeyboardButton:
-    return KeyboardButton(text)
+    return KeyboardButton(text, style=style, icon_custom_emoji_id=icon_custom_emoji_id)
 
 
 def ib(
@@ -106,7 +162,12 @@ def ib(
     icon_custom_emoji_id: str | None = None,
     **kwargs: Any,
 ) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text, **kwargs)
+    return InlineKeyboardButton(
+        text,
+        style=style,
+        icon_custom_emoji_id=icon_custom_emoji_id,
+        **kwargs,
+    )
 
 
 USER_MENU = ReplyKeyboardMarkup(
@@ -1088,6 +1149,7 @@ def register_handlers() -> None:
 
 register_handlers()
 setup_indexes()
+configure_webhook_once()
 
 
 def run_telegram_loop() -> None:
@@ -1127,11 +1189,12 @@ def ensure_telegram_started() -> None:
 
 @flask_app.get("/")
 def health():
-    return jsonify({"ok": True, "bot": "flask-mongo-referral-coin-bot"})
+    public_base_url = request_public_base_url()
+    configure_webhook_once(public_base_url)
+    return jsonify({"ok": True, "bot": "flask-mongo-referral-coin-bot", "webhook": webhook_url(public_base_url)})
 
 
-@flask_app.post("/webhook")
-def webhook():
+def process_webhook_request():
     ensure_telegram_started()
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
     future = asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), telegram_loop)
@@ -1142,21 +1205,23 @@ def webhook():
     return jsonify({"ok": True})
 
 
+@flask_app.post("/webhook")
+def webhook():
+    return process_webhook_request()
+
+
+@flask_app.post(f"/webhook/{WEBHOOK_SECRET}")
+def webhook_with_secret():
+    return process_webhook_request()
+
+
 @flask_app.cli.command("set-webhook")
 def set_webhook_command():
     if not WEBHOOK_URL:
         raise RuntimeError("WEBHOOK_URL kiritilmagan.")
 
-    async def set_webhook():
-        await telegram_app.initialize()
-        webhook_url = WEBHOOK_URL.rstrip("/")
-        if not webhook_url.endswith("/webhook"):
-            webhook_url = f"{webhook_url}/webhook"
-        await telegram_app.bot.set_webhook(webhook_url)
-        await telegram_app.shutdown()
-
-    asyncio.run(set_webhook())
-    print("Webhook o'rnatildi.")
+    asyncio.run(configure_webhook())
+    print(f"Webhook o'rnatildi: {webhook_url()}")
 
 
 if __name__ == "__main__":
