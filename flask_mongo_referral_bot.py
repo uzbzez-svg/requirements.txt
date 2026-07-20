@@ -205,6 +205,14 @@ ADMIN_MENU = InlineKeyboardMarkup(
     ]
 )
 
+LIMITED_ADMIN_MENU = InlineKeyboardMarkup(
+    [
+        [ib("📊 Statistika", "primary", callback_data="admin:stats")],
+        [ib("📢 Hammaga xabar", "primary", callback_data="admin:broadcast")],
+        [ib("📋 Majburiy obunalar ro'yxati", "primary", callback_data="admin:list_channels")],
+    ]
+)
+
 REQUIREMENT_TYPES = {
     "kanal": {
         "label": "📣 Oddiy kanal",
@@ -257,9 +265,17 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS or admins.find_one({"_id": user_id}) is not None
 
 
+def is_owner(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+
 def all_admin_ids() -> set[int]:
     saved_admins = {admin["_id"] for admin in admins.find({}, {"_id": 1})}
     return ADMIN_IDS | saved_admins
+
+
+def admin_menu_for(user_id: int) -> InlineKeyboardMarkup:
+    return ADMIN_MENU if is_owner(user_id) else LIMITED_ADMIN_MENU
 
 
 def main_menu_for(user_id: int) -> ReplyKeyboardMarkup:
@@ -340,6 +356,22 @@ def requirement_type(requirement: dict[str, Any]) -> str:
 
 def requirement_key(requirement: dict[str, Any]) -> str:
     return str(requirement.get("_id"))
+
+
+def can_auto_check_requirement(requirement: dict[str, Any]) -> bool:
+    req_type = requirement_type(requirement)
+    chat_id = str(requirement.get("chat_id", "")).strip()
+    return req_type in {"kanal", "chat", "zayafka"} and (
+        chat_id.startswith("@") or chat_id.startswith("-100")
+    )
+
+
+def member_is_active(member) -> bool:
+    if member.status in {"creator", "administrator", "member"}:
+        return True
+    if member.status == "restricted":
+        return bool(getattr(member, "is_member", False))
+    return False
 
 
 def normalize_bot_username(value: str) -> str:
@@ -432,15 +464,14 @@ def requirement_icon(requirement: dict[str, Any]) -> str:
 
 
 async def is_member(user_id: int, channel: dict[str, Any]) -> bool:
-    req_type = requirement_type(channel)
-    if req_type in {"bot", "instagram", "zayafka", "manual"}:
+    if not can_auto_check_requirement(channel):
         user = get_user(user_id)
         completed = user.get("completed_manual_requirements", []) if user else []
         return requirement_key(channel) in completed
 
     try:
         member = await bot.get_chat_member(channel["chat_id"], user_id)
-        return member.status in {"creator", "administrator", "member", "restricted"}
+        return member_is_active(member)
     except TelegramError:
         return False
 
@@ -463,7 +494,7 @@ def subscription_keyboard(missing: list[dict[str, Any]]) -> InlineKeyboardMarkup
             rows.append([ib(f"{icon} {title}", "primary", url=invite_link)])
         else:
             rows.append([ib(f"{icon} {title}", "primary", callback_data="noop")])
-        if requirement_type(channel) in {"bot", "instagram", "zayafka", "manual"}:
+        if not can_auto_check_requirement(channel):
             rows.append([ib(manual_requirement_done_text(channel), "success", callback_data=f"req_done:{requirement_key(channel)}")])
     rows.append([ib("✅ Obunani tekshirish", "success", callback_data="check_sub")])
     return InlineKeyboardMarkup(rows)
@@ -569,7 +600,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("Bu bo'lim faqat admin uchun.")
         return
-    await update.message.reply_text("🛠 Admin panel:", reply_markup=ADMIN_MENU)
+    await update.message.reply_text("🛠 Admin panel:", reply_markup=admin_menu_for(update.effective_user.id))
 
 
 async def check_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -775,7 +806,7 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if not is_admin(update.effective_user.id):
             await update.message.reply_text("Bu bo'lim faqat admin uchun.")
             return
-        await update.message.reply_text("🛠 Admin panel:", reply_markup=ADMIN_MENU)
+        await update.message.reply_text("🛠 Admin panel:", reply_markup=admin_menu_for(update.effective_user.id))
         return
 
     if not await require_subscription(update, context):
@@ -797,6 +828,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     action = query.data.split(":")[1]
+    owner_only_actions = {"add_channel", "remove_channel", "add_admin", "remove_admin"}
+    if action in owner_only_actions and not is_owner(query.from_user.id):
+        await query.message.reply_text("Bu amal faqat bot egasi uchun.")
+        return
+
     if action == "stats":
         total_users = users.count_documents({})
         total_channels = channels.count_documents({})
@@ -879,8 +915,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def remove_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.message.reply_text("Bu bo'lim faqat admin uchun.")
+    if not is_owner(query.from_user.id):
+        await query.message.reply_text("Majburiy obunani faqat bot egasi olib tashlay oladi.")
         return
     requirement_id = query.data.split(":", 1)[1]
     channels.delete_one({"_id": ObjectId(requirement_id)})
@@ -890,8 +926,8 @@ async def remove_channel_callback(update: Update, context: ContextTypes.DEFAULT_
 async def requirement_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.message.reply_text("Bu bo'lim faqat admin uchun.")
+    if not is_owner(query.from_user.id):
+        await query.message.reply_text("Majburiy obunani faqat bot egasi qo'sha oladi.")
         return
 
     req_type = query.data.split(":", 1)[1]
@@ -916,8 +952,8 @@ async def requirement_type_callback(update: Update, context: ContextTypes.DEFAUL
 async def admin_add_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.message.reply_text("Bu bo'lim faqat admin uchun.")
+    if not is_owner(query.from_user.id):
+        await query.message.reply_text("Adminni faqat bot egasi qo'sha oladi.")
         return
 
     new_admin_id = int(query.data.split(":", 1)[1])
@@ -941,14 +977,14 @@ async def admin_add_confirm_callback(update: Update, context: ContextTypes.DEFAU
         upsert=True,
     )
     users.update_one({"_id": query.from_user.id}, {"$set": {"state": None}, "$unset": {"pending_admin_add": ""}})
-    await query.message.reply_text(f"✅ {user_name(user)} admin qilib qo'shildi.", reply_markup=ADMIN_MENU)
+    await query.message.reply_text(f"✅ {user_name(user)} admin qilib qo'shildi.", reply_markup=admin_menu_for(query.from_user.id))
 
 
 async def admin_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.message.reply_text("Bu bo'lim faqat admin uchun.")
+    if not is_owner(query.from_user.id):
+        await query.message.reply_text("Adminni faqat bot egasi olib tashlay oladi.")
         return
 
     admin_id = int(query.data.split(":", 1)[1])
@@ -959,7 +995,7 @@ async def admin_remove_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if not removed:
         await query.message.reply_text("Admin topilmadi yoki allaqachon olib tashlangan.")
         return
-    await query.message.reply_text(f"✅ {user_name(removed)} adminlikdan olib tashlandi.", reply_markup=ADMIN_MENU)
+    await query.message.reply_text(f"✅ {user_name(removed)} adminlikdan olib tashlandi.", reply_markup=admin_menu_for(query.from_user.id))
 
 
 async def admin_state_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -971,6 +1007,10 @@ async def admin_state_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     state = admin.get("state")
 
     if state == "admin_add_admin_username":
+        if not is_owner(tg_user.id):
+            users.update_one({"_id": tg_user.id}, {"$set": {"state": None}, "$unset": {"pending_admin_add": ""}})
+            await update.message.reply_text("Adminni faqat bot egasi qo'sha oladi.", reply_markup=admin_menu_for(tg_user.id))
+            return
         if not update.message.text:
             await update.message.reply_text("Username matn ko'rinishida yuboring. Masalan: @username")
             return
@@ -1006,6 +1046,10 @@ async def admin_state_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if state == "admin_add_requirement_name":
+        if not is_owner(tg_user.id):
+            users.update_one({"_id": tg_user.id}, {"$set": {"state": None}, "$unset": {"admin_add_requirement": ""}})
+            await update.message.reply_text("Majburiy obunani faqat bot egasi qo'sha oladi.", reply_markup=admin_menu_for(tg_user.id))
+            return
         if not update.message.text:
             await update.message.reply_text("Matn yuboring.")
             return
@@ -1014,7 +1058,7 @@ async def admin_state_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         config = REQUIREMENT_TYPES.get(req_type)
         if not config:
             users.update_one({"_id": tg_user.id}, {"$set": {"state": None}, "$unset": {"admin_add_requirement": ""}})
-            await update.message.reply_text("Tur topilmadi. Qaytadan urinib ko'ring.", reply_markup=ADMIN_MENU)
+            await update.message.reply_text("Tur topilmadi. Qaytadan urinib ko'ring.", reply_markup=admin_menu_for(tg_user.id))
             return
         draft["title"] = update.message.text.strip()
         users.update_one(
@@ -1031,6 +1075,10 @@ async def admin_state_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if state == "admin_add_requirement_target":
+        if not is_owner(tg_user.id):
+            users.update_one({"_id": tg_user.id}, {"$set": {"state": None}, "$unset": {"admin_add_requirement": ""}})
+            await update.message.reply_text("Majburiy obunani faqat bot egasi qo'sha oladi.", reply_markup=admin_menu_for(tg_user.id))
+            return
         if not update.message.text:
             await update.message.reply_text("Matn yuboring.")
             return
@@ -1039,7 +1087,7 @@ async def admin_state_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         title = draft.get("title")
         if not req_type or not title:
             users.update_one({"_id": tg_user.id}, {"$set": {"state": None}, "$unset": {"admin_add_requirement": ""}})
-            await update.message.reply_text("Ma'lumot to'liq emas. Qaytadan urinib ko'ring.", reply_markup=ADMIN_MENU)
+            await update.message.reply_text("Ma'lumot to'liq emas. Qaytadan urinib ko'ring.", reply_markup=admin_menu_for(tg_user.id))
             return
         try:
             save_requirement(req_type, title, update.message.text.strip())
@@ -1050,10 +1098,14 @@ async def admin_state_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             {"_id": tg_user.id},
             {"$set": {"state": None, "updated_at": now()}, "$unset": {"admin_add_requirement": ""}},
         )
-        await update.message.reply_text("✅ Majburiy obuna qo'shildi.", reply_markup=ADMIN_MENU)
+        await update.message.reply_text("✅ Majburiy obuna qo'shildi.", reply_markup=admin_menu_for(tg_user.id))
         return
 
     if state == "admin_add_channel":
+        if not is_owner(tg_user.id):
+            users.update_one({"_id": tg_user.id}, {"$set": {"state": None}})
+            await update.message.reply_text("Majburiy obunani faqat bot egasi qo'sha oladi.", reply_markup=admin_menu_for(tg_user.id))
+            return
         if not update.message.text:
             await update.message.reply_text("Matn yuboring: tur | chat_id yoki username | nomi | link")
             return
