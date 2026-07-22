@@ -59,7 +59,7 @@ def first_valid_env(*names: str, default: str = "") -> str:
             return value
     return default
 
-BOT_TOKEN = first_valid_env("8831278254:AAHdL4in2whlp76ZOGkw0tNimW5XeCQQOyc", "8831278254:AAHdL4in2whlp76ZOGkw0tNimW5XeCQQOyc", "8831278254:AAHdL4in2whlp76ZOGkw0tNimW5XeCQQOyc")
+BOT_TOKEN = first_valid_env("BOT_TOKEN", "8831278254:AAHdL4in2whlp76ZOGkw0tNimW5XeCQQOyc", "TOKEN")
 ADMIN_IDS_TEXT = os.getenv("ADMIN_IDS", "6968399046").strip()
 MONGO_URI = first_valid_env(
     "MONGODB_URI",
@@ -181,7 +181,7 @@ def ib(
 USER_MENU = ReplyKeyboardMarkup(
     [
         [kb("🪙 Tekin coin olish", "success"), kb("💼 Mening hisobim", "primary")],
-        [kb("🛒 Coinni yechish", "danger")],
+        [kb("🛒 Coinni yechish", "danger"), kb("🎁 Promo kod", "success")],
     ],
     resize_keyboard=True,
 )
@@ -189,7 +189,7 @@ USER_MENU = ReplyKeyboardMarkup(
 ADMIN_MAIN_MENU = ReplyKeyboardMarkup(
     [
         [kb("🪙 Tekin coin olish", "success"), kb("💼 Mening hisobim", "primary")],
-        [kb("🛒 Coinni yechish", "danger")],
+        [kb("🛒 Coinni yechish", "danger"), kb("🎁 Promo kod", "success")],
         [kb("🛠 Admin panel", "primary")],
     ],
     resize_keyboard=True,
@@ -210,6 +210,10 @@ ADMIN_MENU = InlineKeyboardMarkup(
             ib("👑 Yangi admin qo'shish", "success", callback_data="admin:add_admin"),
             ib("🗑 Adminni olib tashlash", "danger", callback_data="admin:remove_admin"),
         ],
+        [
+            ib("🪙 Foydalanuvchiga coin", "success", callback_data="admin:add_coin"),
+            ib("🎁 Promo kod qo'shish", "success", callback_data="admin:add_promo"),
+        ],
     ]
 )
 
@@ -218,6 +222,8 @@ LIMITED_ADMIN_MENU = InlineKeyboardMarkup(
         [ib("📊 Statistika", "primary", callback_data="admin:stats")],
         [ib("📢 Hammaga xabar", "primary", callback_data="admin:broadcast")],
         [ib("📋 Majburiy obunalar ro'yxati", "primary", callback_data="admin:list_channels")],
+        [ib("🪙 Foydalanuvchiga coin", "success", callback_data="admin:add_coin")],
+        [ib("🎁 Promo kod qo'shish", "success", callback_data="admin:add_promo")],
     ]
 )
 
@@ -296,7 +302,17 @@ class AdminStateFilter(filters.MessageFilter):
         if not tg_user or not is_admin(tg_user.id):
             return False
         user = get_user(tg_user.id)
-        return bool(user and user.get("state"))
+        state = user.get("state") if user else None
+        return bool(state and str(state).startswith("admin_"))
+
+
+class PromoStateFilter(filters.MessageFilter):
+    def filter(self, message) -> bool:
+        tg_user = message.from_user
+        if not tg_user:
+            return False
+        user = get_user(tg_user.id)
+        return bool(user and user.get("state") == "promo_enter_code")
 
 
 def get_user(user_id: int) -> dict[str, Any] | None:
@@ -319,6 +335,35 @@ def find_user_by_username(username: str) -> dict[str, Any] | None:
     if not clean:
         return None
     return users.find_one({"username": {"$regex": f"^{re.escape(clean)}$", "$options": "i"}})
+
+
+def find_user_by_text(value: str) -> dict[str, Any] | None:
+    value = value.strip()
+    if value.lstrip("-").isdigit():
+        return get_user(int(value))
+    return find_user_by_username(value)
+
+
+def normalize_promo_code(value: str) -> str:
+    return re.sub(r"\s+", "", value.strip()).upper()
+
+
+def parse_positive_int(value: str, field_name: str) -> int:
+    value = value.strip().replace(" ", "")
+    if not value.isdigit():
+        raise ValueError(f"{field_name} faqat musbat son bo'lishi kerak.")
+    number = int(value)
+    if number <= 0:
+        raise ValueError(f"{field_name} 0 dan katta bo'lishi kerak.")
+    return number
+
+
+def is_expired(expires_at: datetime | None) -> bool:
+    if not expires_at:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at <= now()
 
 
 def profile_url(user_id: int) -> str:
@@ -806,6 +851,78 @@ async def withdraw_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.message.reply_text(f"✅ So'rov qabul qilindi. {label} uchun {price} coin yechildi.")
 
 
+async def promo_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    users.update_one(
+        {"_id": update.effective_user.id},
+        {"$set": {"state": "promo_enter_code", "updated_at": now()}},
+    )
+    await update.message.reply_text("🎁 Promo kodni yuboring.", reply_markup=main_menu_for(update.effective_user.id))
+
+
+async def redeem_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tg_user = update.effective_user
+    code = normalize_promo_code(update.message.text or "")
+    users.update_one({"_id": tg_user.id}, {"$set": {"state": None, "updated_at": now()}})
+
+    if not code:
+        await update.message.reply_text("Promo kod bo'sh bo'lmasin.", reply_markup=main_menu_for(tg_user.id))
+        return
+
+    promo = promo_codes.find_one({"code": code})
+    if not promo:
+        await update.message.reply_text("Promo kod topilmadi.", reply_markup=main_menu_for(tg_user.id))
+        return
+    if not promo.get("active", True):
+        await update.message.reply_text("Bu promo kod faol emas.", reply_markup=main_menu_for(tg_user.id))
+        return
+    if is_expired(promo.get("expires_at")):
+        await update.message.reply_text("Promo kod muddati tugagan.", reply_markup=main_menu_for(tg_user.id))
+        return
+    if promo.get("used_count", 0) >= promo.get("max_uses", 0):
+        await update.message.reply_text("Promo kod limiti tugagan.", reply_markup=main_menu_for(tg_user.id))
+        return
+    if promo_redemptions.find_one({"code": code, "user_id": tg_user.id}):
+        await update.message.reply_text("Siz bu promo koddan oldin foydalangansiz.", reply_markup=main_menu_for(tg_user.id))
+        return
+
+    result = promo_codes.update_one(
+        {
+            "_id": promo["_id"],
+            "active": True,
+            "expires_at": {"$gt": now()},
+            "$expr": {"$lt": ["$used_count", "$max_uses"]},
+        },
+        {"$inc": {"used_count": 1}, "$set": {"updated_at": now()}},
+    )
+    if result.modified_count != 1:
+        await update.message.reply_text("Promo kod limiti tugadi.", reply_markup=main_menu_for(tg_user.id))
+        return
+
+    try:
+        promo_redemptions.insert_one(
+            {
+                "code": code,
+                "user_id": tg_user.id,
+                "username": tg_user.username,
+                "coins": promo["coins"],
+                "created_at": now(),
+            }
+        )
+    except DuplicateKeyError:
+        promo_codes.update_one({"_id": promo["_id"]}, {"$inc": {"used_count": -1}})
+        await update.message.reply_text("Siz bu promo koddan oldin foydalangansiz.", reply_markup=main_menu_for(tg_user.id))
+        return
+
+    users.update_one(
+        {"_id": tg_user.id},
+        {"$inc": {"coins": promo["coins"]}, "$set": {"updated_at": now()}},
+    )
+    await update.message.reply_text(
+        f"✅ Promo kod qabul qilindi!\nBalansingizga {promo['coins']} coin qo'shildi.",
+        reply_markup=main_menu_for(tg_user.id),
+    )
+
+
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text
     upsert_user(update.effective_user)
@@ -826,6 +943,8 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await my_account(update, context)
     elif text == "🛒 Coinni yechish":
         await withdraw_menu(update, context)
+    elif text == "🎁 Promo kod":
+        await promo_menu(update, context)
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -882,6 +1001,25 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action == "broadcast":
         users.update_one({"_id": query.from_user.id}, {"$set": {"state": "admin_broadcast"}})
         await query.message.reply_text("Yuboriladigan xabarni tashlang. Matn, rasm, video va boshqa turdagi xabarlar ishlaydi.")
+        return
+
+    if action == "add_coin":
+        users.update_one(
+            {"_id": query.from_user.id},
+            {"$set": {"state": "admin_add_coin_user", "updated_at": now()}, "$unset": {"admin_add_coin": ""}},
+        )
+        await query.message.reply_text(
+            "Coin tashlanadigan foydalanuvchini yuboring.\n\n"
+            "User ID yoki @username yuboring. Masalan: 123456789"
+        )
+        return
+
+    if action == "add_promo":
+        users.update_one(
+            {"_id": query.from_user.id},
+            {"$set": {"state": "admin_add_promo_code", "updated_at": now()}, "$unset": {"admin_add_promo": ""}},
+        )
+        await query.message.reply_text("Promo kod nomini yuboring. Istalgan kod bo'lishi mumkin. Masalan: CLC500")
         return
 
     if action == "add_admin":
@@ -1147,6 +1285,163 @@ async def admin_state_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("✅ Majburiy obuna qo'shildi.", reply_markup=main_menu_for(tg_user.id))
         return
 
+    if state == "admin_add_coin_user":
+        if not update.message.text:
+            await update.message.reply_text("User ID yoki @username yuboring.")
+            return
+        target_user = find_user_by_text(update.message.text)
+        if not target_user:
+            await update.message.reply_text("Foydalanuvchi topilmadi. Avval botga /start bosgan bo'lishi kerak.")
+            return
+        users.update_one(
+            {"_id": tg_user.id},
+            {
+                "$set": {
+                    "state": "admin_add_coin_amount",
+                    "admin_add_coin": {"user_id": target_user["_id"]},
+                    "updated_at": now(),
+                }
+            },
+        )
+        await update.message.reply_text(f"{user_name(target_user)} uchun qancha coin tashlaysiz?")
+        return
+
+    if state == "admin_add_coin_amount":
+        draft = admin.get("admin_add_coin") or {}
+        target_user_id = draft.get("user_id")
+        target_user = get_user(target_user_id) if target_user_id else None
+        if not target_user:
+            users.update_one({"_id": tg_user.id}, {"$set": {"state": None}, "$unset": {"admin_add_coin": ""}})
+            await update.message.reply_text("Foydalanuvchi topilmadi. Qaytadan urinib ko'ring.", reply_markup=admin_menu_for(tg_user.id))
+            return
+        try:
+            amount = parse_positive_int(update.message.text or "", "Coin miqdori")
+        except ValueError as exc:
+            await update.message.reply_text(str(exc))
+            return
+
+        users.update_one(
+            {"_id": target_user["_id"]},
+            {"$inc": {"coins": amount}, "$set": {"updated_at": now()}},
+        )
+        users.update_one({"_id": tg_user.id}, {"$set": {"state": None, "updated_at": now()}, "$unset": {"admin_add_coin": ""}})
+        coin_transfers.insert_one(
+            {
+                "admin_id": tg_user.id,
+                "user_id": target_user["_id"],
+                "coins": amount,
+                "created_at": now(),
+            }
+        )
+        try:
+            await context.bot.send_message(target_user["_id"], f"✅ Hisobingizga admin tomonidan {amount} coin qo'shildi.")
+        except TelegramError:
+            pass
+        await update.message.reply_text(
+            f"✅ {user_name(target_user)} hisobiga {amount} coin qo'shildi.",
+            reply_markup=admin_menu_for(tg_user.id),
+        )
+        return
+
+    if state == "admin_add_promo_code":
+        if not update.message.text:
+            await update.message.reply_text("Promo kod nomini yuboring.")
+            return
+        code = normalize_promo_code(update.message.text)
+        if not code:
+            await update.message.reply_text("Promo kod bo'sh bo'lmasin.")
+            return
+        if promo_codes.find_one({"code": code}):
+            await update.message.reply_text("Bu promo kod allaqachon mavjud. Boshqa kod kiriting.")
+            return
+        users.update_one(
+            {"_id": tg_user.id},
+            {
+                "$set": {
+                    "state": "admin_add_promo_coins",
+                    "admin_add_promo": {"code": code},
+                    "updated_at": now(),
+                }
+            },
+        )
+        await update.message.reply_text(f"Promo kod: {code}\nEndi qancha coin berilishini yuboring.")
+        return
+
+    if state == "admin_add_promo_coins":
+        try:
+            coins = parse_positive_int(update.message.text or "", "Coin")
+        except ValueError as exc:
+            await update.message.reply_text(str(exc))
+            return
+        draft = admin.get("admin_add_promo") or {}
+        draft["coins"] = coins
+        users.update_one(
+            {"_id": tg_user.id},
+            {"$set": {"state": "admin_add_promo_hours", "admin_add_promo": draft, "updated_at": now()}},
+        )
+        await update.message.reply_text("Promo kod muddati necha soat bo'lsin? Masalan: 24")
+        return
+
+    if state == "admin_add_promo_hours":
+        try:
+            hours = parse_positive_int(update.message.text or "", "Muddat soati")
+        except ValueError as exc:
+            await update.message.reply_text(str(exc))
+            return
+        draft = admin.get("admin_add_promo") or {}
+        draft["hours"] = hours
+        users.update_one(
+            {"_id": tg_user.id},
+            {"$set": {"state": "admin_add_promo_limit", "admin_add_promo": draft, "updated_at": now()}},
+        )
+        await update.message.reply_text("Promo koddan nechta odam foydalana olsin? Masalan: 3")
+        return
+
+    if state == "admin_add_promo_limit":
+        draft = admin.get("admin_add_promo") or {}
+        code = draft.get("code")
+        coins = draft.get("coins")
+        hours = draft.get("hours")
+        if not code or not coins or not hours:
+            users.update_one({"_id": tg_user.id}, {"$set": {"state": None}, "$unset": {"admin_add_promo": ""}})
+            await update.message.reply_text("Promo ma'lumotlari to'liq emas. Qaytadan urinib ko'ring.", reply_markup=admin_menu_for(tg_user.id))
+            return
+        try:
+            max_uses = parse_positive_int(update.message.text or "", "Odam soni")
+        except ValueError as exc:
+            await update.message.reply_text(str(exc))
+            return
+
+        expires_at = now() + timedelta(hours=hours)
+        try:
+            promo_codes.insert_one(
+                {
+                    "code": code,
+                    "coins": coins,
+                    "max_uses": max_uses,
+                    "used_count": 0,
+                    "active": True,
+                    "created_by": tg_user.id,
+                    "created_at": now(),
+                    "updated_at": now(),
+                    "expires_at": expires_at,
+                }
+            )
+        except DuplicateKeyError:
+            await update.message.reply_text("Bu promo kod allaqachon mavjud. Boshqa kod kiriting.")
+            return
+
+        users.update_one({"_id": tg_user.id}, {"$set": {"state": None, "updated_at": now()}, "$unset": {"admin_add_promo": ""}})
+        await update.message.reply_text(
+            "✅ Promo kod yaratildi.\n\n"
+            f"Kod: {code}\n"
+            f"Coin: {coins}\n"
+            f"Muddat: {hours} soat\n"
+            f"Limit: {max_uses} odam",
+            reply_markup=admin_menu_for(tg_user.id),
+        )
+        return
+
     if state == "admin_broadcast":
         users.update_one({"_id": tg_user.id}, {"$set": {"state": None}})
         await update.message.reply_text("📢 Xabar yuborish boshlandi.")
@@ -1199,11 +1494,12 @@ def register_handlers() -> None:
     telegram_app.add_handler(
         MessageHandler(
             filters.TEXT
-            & filters.Regex("^(🪙 Tekin coin olish|💼 Mening hisobim|🛒 Coinni yechish|🛠 Admin panel)$"),
+            & filters.Regex("^(🪙 Tekin coin olish|💼 Mening hisobim|🛒 Coinni yechish|🎁 Promo kod|🛠 Admin panel)$"),
             main_menu_handler,
         )
     )
     telegram_app.add_handler(MessageHandler(AdminStateFilter(), admin_state_messages))
+    telegram_app.add_handler(MessageHandler(PromoStateFilter() & filters.TEXT, redeem_promo))
     telegram_app.add_handler(MessageHandler(filters.ALL, unknown))
 
 
