@@ -77,7 +77,7 @@ REFERRAL_REWARD = int(os.getenv("REFERRAL_REWARD", "1000"))
 UTC = timezone.utc
 ADMIN_IDS = {int(item.strip()) for item in ADMIN_IDS_TEXT.split(",") if item.strip().isdigit()}
 
-if not BOT_TOKEN or "SHU_YERGA" in BOT_TOKEN:
+if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN kiritilmagan. BOT_TOKEN env qiymatini yoki fayldagi joyni to'ldiring.")
 if not MONGO_URI:
     raise RuntimeError("MONGO_URI yoki MONGODB_URI kiritilmagan. .env ichiga MongoDB connection string yozing.")
@@ -95,7 +95,7 @@ promo_redemptions = db.promo_redemptions
 coin_transfers = db.coin_transfers
 
 telegram_app = Application.builder().token(BOT_TOKEN).build()
-bot = Bot(BOT_TOKEN)
+bot = Bot(token=BOT_TOKEN)
 flask_app = Flask(__name__)
 telegram_started = False
 telegram_start_error: BaseException | None = None
