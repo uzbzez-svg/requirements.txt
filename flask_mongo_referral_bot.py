@@ -59,7 +59,7 @@ def first_valid_env(*names: str, default: str = "") -> str:
             return value
     return default
 
-BOT_TOKEN = first_valid_env("8831278254:AAHdL4in2whlp76ZOGkw0tNimW5XeCQQOyc")
+BOT_TOKEN = first_valid_env("8831278254:AAHdL4in2whlp76ZOGkw0tNimW5XeCQQOyc", "8831278254:AAHdL4in2whlp76ZOGkw0tNimW5XeCQQOyc", "8831278254:AAHdL4in2whlp76ZOGkw0tNimW5XeCQQOyc")
 ADMIN_IDS_TEXT = os.getenv("ADMIN_IDS", "6968399046").strip()
 MONGO_URI = first_valid_env(
     "MONGODB_URI",
