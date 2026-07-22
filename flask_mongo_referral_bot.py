@@ -59,7 +59,7 @@ def first_valid_env(*names: str, default: str = "") -> str:
             return value
     return default
 
-BOT_TOKEN = first_valid_env("BOT_TOKEN", default="8831278254:AAHdL4in2whlp76ZOGkw0tNimW5XeCQQOyc")
+BOT_TOKEN = first_valid_env("BOT_TOKEN")
 ADMIN_IDS_TEXT = os.getenv("ADMIN_IDS", "6968399046").strip()
 MONGO_URI = first_valid_env(
     "MONGODB_URI",
@@ -90,6 +90,9 @@ channels = db.channels
 withdrawals = db.withdrawals
 broadcasts = db.broadcasts
 admins = db.admins
+promo_codes = db.promo_codes
+promo_redemptions = db.promo_redemptions
+coin_transfers = db.coin_transfers
 
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 bot = Bot(BOT_TOKEN)
@@ -116,6 +119,11 @@ def setup_indexes() -> None:
     withdrawals.create_index([("user_id", ASCENDING), ("created_at", DESCENDING)])
     admins.create_index([("_id", ASCENDING)])
     admins.create_index([("username", ASCENDING)])
+    promo_codes.create_index([("code", ASCENDING)], unique=True)
+    promo_codes.create_index([("active", ASCENDING), ("expires_at", ASCENDING)])
+    promo_redemptions.create_index([("code", ASCENDING), ("user_id", ASCENDING)], unique=True)
+    promo_redemptions.create_index([("user_id", ASCENDING), ("created_at", DESCENDING)])
+    coin_transfers.create_index([("admin_id", ASCENDING), ("created_at", DESCENDING)])
 
 
 def webhook_path() -> str:
