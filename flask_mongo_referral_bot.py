@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import sys
 import threading
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone
@@ -77,10 +78,26 @@ REFERRAL_REWARD = int(os.getenv("REFERRAL_REWARD", "1000"))
 UTC = timezone.utc
 ADMIN_IDS = {int(item.strip()) for item in ADMIN_IDS_TEXT.split(",") if item.strip().isdigit()}
 
+def masked(value: str) -> str:
+    if not value:
+        return "yo'q"
+    if len(value) <= 12:
+        return "***"
+    return f"{value[:6]}...{value[-4:]}"
+
+
+print(
+    "ENV check:",
+    f"BOT_TOKEN={masked(BOT_TOKEN)}",
+    f"MONGO_URI={masked(MONGO_URI)}",
+    f"MONGO_DB={MONGO_DB or 'yoq'}",
+    file=sys.stderr,
+)
+
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN kiritilmagan. BOT_TOKEN env qiymatini yoki fayldagi joyni to'ldiring.")
+    raise RuntimeError("BOT_TOKEN kiritilmagan. Render Environment bo'limida BOT_TOKEN qiymatini qo'shing.")
 if not MONGO_URI:
-    raise RuntimeError("MONGO_URI yoki MONGODB_URI kiritilmagan. .env ichiga MongoDB connection string yozing.")
+    raise RuntimeError("MONGODB_URI kiritilmagan. Render Environment bo'limida MONGODB_URI qiymatini qo'shing.")
 
 mongo = MongoClient(MONGO_URI)
 db = mongo[MONGO_DB]
